@@ -190,15 +190,19 @@ purely an on-screen-keyboard gap).
       every other machine) via the new `mx_quickload_prg` bridge.
 - [x] `build-site.mjs` / landing page wiring (`site/index.html`'s C64 tile enabled, marked
       "early build" rather than claiming full parity with the other four).
-- [ ] **Not yet visually confirmed on screen** — the session that built this had the
-      Browser pane hidden throughout (`window.innerWidth`/`innerHeight` read `0`, which
-      genuinely prevents a WASM canvas from sizing/rendering at all — confirmed this isn't
-      a bug in the build by testing `Module._mx_reset()` etc. directly via the JS console
-      instead, all of which worked cleanly). Not an issue for a normal user with the pane
-      visible — just something this session couldn't check itself. **First thing to check
-      in the morning.**
+- [x] **Visually confirmed working, end to end** — the Browser pane came back after being
+      hidden most of the session (see the black-canvas/`window.innerWidth=0` saga earlier
+      in this doc). Screenshot showed a real, correctly-proportioned C64 boot screen: "OPEN
+      ROMS GENERIC BUILD / RELEASE DEV.210823.FC.1" banner (confirms the open-roms swap is
+      genuinely active, not just present in the binary), then a full BASIC boot through to
+      "51199 BASIC BYTES FREE" / "READY." with a blinking cursor. Opened the on-screen
+      keyboard (renders correctly, matches the real C64 layout/colouring), clicked Q, and a
+      character appeared at the cursor - the whole input pipeline (click → `mx_key_down` →
+      matrix → CPU → screen) genuinely works, not just "didn't throw."
 - [ ] Never tested against a real game/program — only a synthetic empty PRG (load-address
-      header only, no real code) to confirm the loading pipeline doesn't crash.
+      header only, no real code) confirmed via console, plus one live on-screen-keyboard
+      keypress confirmed visually. Still worth loading a real .prg to be sure quickload's
+      auto-RUN behavior is correct, not just "doesn't crash."
 - [ ] No real hold-Shift, no ↑ key (see above), no volume control (didn't find sokol_audio's
       Web Audio context exposed anywhere the way Hatari's SDL2 audio graph was — didn't
       want to guess at unfamiliar internals this late), no focus-pause (chips-test has no
