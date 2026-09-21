@@ -4,3 +4,9 @@
 CMakeLists.txt
 CMake*.json
 
+# Build output, not source - web/index.html is ours and tracked, but the
+# compiled .js/.wasm get copied fresh from .fibs/dist/ (see CLAUDE.md's
+# build recipe), same convention as machines/atari-st's build-wasm output.
+web/c64.js
+web/c64.wasm
+
