@@ -58,6 +58,41 @@ static struct {
     #endif
 } state;
 
+// The Multitude's own thin web bridge - CHIPS_USE_UI (the imgui debug
+// overlay + webapi.c) is only linked into the heavier `c64-ui` fibs
+// target, not the plain `c64` one we actually build (no debug UI wanted
+// in our own shell). Same "small, project-owned exported bridge"
+// pattern as machines/atari-st's web_api.c, just for the handful of
+// calls our shell actually needs: reset, held key press/release (for
+// the on-screen keyboard's lockable-shift support), and PRG quickload
+// (mirrors handle_file_loading()'s own drag-drop path below - load then
+// simulate typing RUN - rather than webapi.c's SYS-call path, which
+// assumes a machine-code entry point, not a plain BASIC program).
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+
+EMSCRIPTEN_KEEPALIVE void mx_reset(void) {
+    c64_reset(&state.c64);
+}
+
+EMSCRIPTEN_KEEPALIVE void mx_key_down(int c) {
+    c64_key_down(&state.c64, c);
+}
+
+EMSCRIPTEN_KEEPALIVE void mx_key_up(int c) {
+    c64_key_up(&state.c64, c);
+}
+
+EMSCRIPTEN_KEEPALIVE bool mx_quickload_prg(void* ptr, int size) {
+    chips_range_t prg = { .ptr = ptr, .size = (size_t)size };
+    bool loaded = c64_quickload(&state.c64, prg);
+    if (loaded) {
+        c64_basic_run(&state.c64);
+    }
+    return loaded;
+}
+#endif
+
 #ifdef CHIPS_USE_UI
 static void ui_draw_cb(const ui_draw_info_t* draw_info);
 static void ui_save_settings_cb(ui_settings_t* settings);

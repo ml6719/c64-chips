@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>The Multitude — C64</title>
+	<style>
+		/* Literal copy of machines/_shared/src/toolbar.css's whole-page
+		   scaffold (hamburger dropdown on narrow screens, permanent
+		   right-side sidebar once there's width to spare) - this is a
+		   standalone fibs/Emscripten build, not a bundler that can import
+		   it, so keep these two in sync by eye. See that file (or
+		   machines/atari-st/web/index.html, which copies the same block)
+		   for the reasoning behind the breakpoint/sidebar choice. */
+		html, body.mx-app {
+			margin: 0;
+			height: 100%;
+			overflow: hidden;
+			background: #111;
+		}
+		body.mx-app {
+			display: flex;
+			flex-direction: column;
+			font-family: monospace;
+			color: #edebf5;
+		}
+		.mx-hamburger {
+			position: fixed;
+			top: 8px;
+			right: 8px;
+			z-index: 30;
+			width: 40px;
+			height: 40px;
+			font-size: 18px;
+			background: #262842;
+			color: #edebf5;
+			border: 1px solid #565a82;
+			border-radius: 4px;
+			cursor: pointer;
+		}
+		.mx-toolbar {
+			display: none;
+			flex-direction: column;
+			align-items: stretch;
+			gap: 10px;
+			position: fixed;
+			inset: 0 0 auto 0;
+			z-index: 20;
+			padding: 56px 16px 16px;
+			background: #1a1b2e;
+			border-bottom: 2px solid #43456a;
+			font-family: monospace;
+			font-size: 14px;
+			color: #edebf5;
+			max-height: 100%;
+			overflow-y: auto;
+			box-sizing: border-box;
+		}
+		.mx-toolbar.mx-open {
+			display: flex;
+		}
+		.mx-toolbar button {
+			font-family: monospace;
+			font-size: 13px;
+			background: #262842;
+			color: #edebf5;
+			border: 1px solid #565a82;
+			padding: 6px 8px;
+			cursor: pointer;
+		}
+		.mx-main {
+			flex: 1;
+			min-height: 0;
+			display: flex;
+			flex-direction: column;
+		}
+		#canvas-wrap {
+			flex: 1;
+			min-height: 0;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			overflow: hidden;
+		}
+		#canvas {
+			display: block;
+			image-rendering: pixelated;
+			background: #000;
+		}
+		@media (min-width: 700px) {
+			body.mx-app {
+				flex-direction: row;
+			}
+			.mx-hamburger {
+				display: none;
+			}
+			.mx-toolbar {
+				display: flex !important;
+				position: static;
+				inset: auto;
+				order: 2;
+				width: 220px;
+				flex-shrink: 0;
+				height: 100%;
+				padding: 16px;
+				border-bottom: none;
+				border-left: 2px solid #43456a;
+			}
+			.mx-main {
+				order: 1;
+			}
+		}
+
+		/* On-screen keyboard: beige/tan Commodore-style keys with the
+		   iconic brown/rust accent row (CTRL/RUN-STOP/RESTORE/SHIFT-LOCK
+		   equivalents), matching real C64 keycap colouring - distinct
+		   from every other machine's theme so far. Hidden by default via
+		   [hidden], same convention as the other machines' keyboard
+		   toggle. */
+		#keyboard {
+			flex-shrink: 0;
+			display: flex;
+			flex-direction: column;
+			gap: 3px;
+			background: #8a7f6a;
+			padding: 8px 8px 10px;
+		}
+		#keyboard[hidden] {
+			display: none;
+		}
+		.c64-vkb-row {
+			display: flex;
+			gap: 3px;
+		}
+		.c64-vkb-key {
+			flex: 1 1 0;
+			background: #cbbfa0;
+			border: 1px solid #6b5f4a;
+			border-radius: 4px;
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 2px 2px rgba(0, 0, 0, 0.35);
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			padding: 4px 2px;
+			font-family: monospace;
+			font-size: 13px;
+			color: #2a2416;
+			user-select: none;
+			touch-action: none;
+		}
+		.c64-vkb-key:active {
+			box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.4);
+		}
+		.c64-vkb-key.c64-vkb-accent {
+			background: #6b4a3a;
+			color: #ede4d0;
+		}
+		.c64-vkb-key.c64-vkb-locked {
+			box-shadow: inset 0 0 0 2px #4a9c94;
+		}
+		.c64-vkb-top {
+			font-size: 10px;
+			line-height: 1;
+		}
+	</style>
+</head>
+<body class="mx-app">
+	<button id="hamburger" class="mx-hamburger">☰</button>
+	<div id="toolbar" class="mx-toolbar">
+		<button id="reset">Reset</button>
+		<button id="pick-prg" class="mx-load">Load PRG…</button>
+		<input type="file" id="file-prg" accept=".prg,.zip" hidden />
+		<button id="fullscreen">Fullscreen</button>
+		<button id="keyboard-toggle">⌨ Keyboard</button>
+	</div>
+	<div class="mx-main">
+		<div id="canvas-wrap">
+			<canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+		</div>
+		<div id="keyboard" hidden></div>
+	</div>
+	<script>
+		// The Multitude's own web bridge — mx_reset()/mx_key_down()/
+		// mx_key_up()/mx_quickload_prg() are exported straight from
+		// examples/emus/c64.c (see the comment there for why: the plain
+		// `c64` fibs target has no webapi.c wired in at all, only the
+		// heavier `-ui` variant with floooh's own debug overlay does, and
+		// we don't want that UI in our shell). All four are safe to call
+		// at any time — chips-test's main loop is a plain per-frame
+		// callback (sokol_app's emscripten_request_animation_frame),
+		// nothing like Hatari's Asyncify-coroutine danger zone, so no
+		// pending-action/memory-write dance is needed here.
+		var Module = {
+			canvas: document.getElementById('canvas'),
+			onRuntimeInitialized: function () { onReady(Module); },
+		};
+
+		// ZIP support (ported from The Multitude's zx84 vendor, same
+		// dependency-free approach as every other machine here: browser
+		// DecompressionStream('deflate-raw'), no bundler/library).
+		async function unzip(data, exts) {
+			const lowerExts = exts.map((e) => e.toLowerCase());
+			const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+			const eocdSig = 0x06054b50;
+			const searchStart = Math.max(0, data.length - 65557);
+			let eocdOffset = -1;
+			for (let i = data.length - 22; i >= searchStart; i--) {
+				if (view.getUint32(i, true) === eocdSig) { eocdOffset = i; break; }
+			}
+			if (eocdOffset === -1) throw new Error('Not a valid ZIP file (EOCD not found)');
+			const totalEntries = view.getUint16(eocdOffset + 10, true);
+			const cdOffset = view.getUint32(eocdOffset + 16, true);
+			const cdSig = 0x02014b50;
+			const lfhSig = 0x04034b50;
+			const entries = [];
+			let pos = cdOffset;
+			for (let i = 0; i < totalEntries; i++) {
+				if (pos + 46 > data.length || view.getUint32(pos, true) !== cdSig) break;
+				const method = view.getUint16(pos + 10, true);
+				const compressedSize = view.getUint32(pos + 20, true);
+				const uncompressedSize = view.getUint32(pos + 24, true);
+				const nameLen = view.getUint16(pos + 28, true);
+				const extraLen = view.getUint16(pos + 30, true);
+				const commentLen = view.getUint16(pos + 32, true);
+				const localHeaderOffset = view.getUint32(pos + 42, true);
+				const nameBytes = data.subarray(pos + 46, pos + 46 + nameLen);
+				const name = new TextDecoder('utf-8').decode(nameBytes);
+				pos += 46 + nameLen + extraLen + commentLen;
+				if (name.endsWith('/')) continue;
+				if (method !== 0 && method !== 8) continue;
+				if (!lowerExts.some((ext) => name.toLowerCase().endsWith(ext))) continue;
+				entries.push({ name, method, compressedSize, uncompressedSize, localHeaderOffset });
+			}
+			const results = [];
+			for (const entry of entries) {
+				const lhPos = entry.localHeaderOffset;
+				if (lhPos + 30 > data.length || view.getUint32(lhPos, true) !== lfhSig) continue;
+				const localNameLen = view.getUint16(lhPos + 26, true);
+				const localExtraLen = view.getUint16(lhPos + 28, true);
+				const dataStart = lhPos + 30 + localNameLen + localExtraLen;
+				const compressed = data.subarray(dataStart, dataStart + entry.compressedSize);
+				const fileData = entry.method === 0 ? compressed : await inflate(compressed);
+				results.push({ name: entry.name, data: fileData });
+			}
+			return results;
+		}
+		async function inflate(compressed) {
+			const ds = new DecompressionStream('deflate-raw');
+			const writer = ds.writable.getWriter();
+			writer.write(compressed);
+			writer.close();
+			const reader = ds.readable.getReader();
+			const chunks = [];
+			let totalLen = 0;
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				chunks.push(value);
+				totalLen += value.byteLength;
+			}
+			const result = new Uint8Array(totalLen);
+			let offset = 0;
+			for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+			return result;
+		}
+
+		function quickloadPrg(bytes) {
+			// 'array' arg type marshals via stack allocation - no need for
+			// raw _malloc/_free (not exported by default; ccall is, via
+			// this target's one extra EXPORTED_RUNTIME_METHODS link option
+			// in fibs.ts, scoped to just the c64 target).
+			return Module.ccall('mx_quickload_prg', 'boolean', ['array', 'number'], [bytes, bytes.length]);
+		}
+
+		function onReady(Module) {
+			document.getElementById('reset').addEventListener('click', () => Module._mx_reset());
+
+			const fileInput = document.getElementById('file-prg');
+			document.getElementById('pick-prg').addEventListener('click', () => fileInput.click());
+			fileInput.addEventListener('change', async () => {
+				const file = fileInput.files[0];
+				if (!file) return;
+				let bytes = new Uint8Array(await file.arrayBuffer());
+				if (/\.zip$/i.test(file.name)) {
+					const entries = await unzip(bytes, ['.prg']);
+					if (entries.length === 0) { alert('ZIP has no .prg file'); return; }
+					bytes = entries[0].data;
+				}
+				quickloadPrg(bytes);
+			});
+
+			document.getElementById('fullscreen').addEventListener('click', () => {
+				document.documentElement.requestFullscreen();
+			});
+
+			document.getElementById('hamburger').addEventListener('click', () => {
+				document.getElementById('toolbar').classList.toggle('mx-open');
+			});
+
+			// Canvas sizing: sokol_app's own Emscripten backend already
+			// watches window resize and re-fits its backing store to
+			// whatever CSS box the canvas has (confirmed in sokol_app.h -
+			// emscripten_set_resize_callback), unlike Hatari/SDL2 which
+			// needed our own manual resize loop. We just need to give it
+			// an aspect-ratio-correct CSS box ourselves, same as every
+			// other machine's canvas-wrap.
+			const canvas = document.getElementById('canvas');
+			const canvasWrap = document.getElementById('canvas-wrap');
+			function resizeCanvas() {
+				if (!canvas.width || !canvas.height) return;
+				const scale = Math.min(
+					canvasWrap.clientWidth / canvas.width,
+					canvasWrap.clientHeight / canvas.height
+				);
+				canvas.style.width = Math.floor(canvas.width * scale) + 'px';
+				canvas.style.height = Math.floor(canvas.height * scale) + 'px';
+			}
+			window.addEventListener('resize', resizeCanvas);
+			new MutationObserver(resizeCanvas).observe(canvas, { attributes: true, attributeFilter: ['width', 'height'] });
+			resizeCanvas();
+
+			// Focus-pause: chips-test doesn't have Hatari's pause()/
+			// resume() API exposed to us, so approximate it by starving
+			// the emscripten_request_animation_frame loop — the browser
+			// already does this automatically for a backgrounded tab, so
+			// this is really just making sure our own canvas isn't
+			// fighting that. Nothing to wire here beyond what the browser
+			// already does by default; noted as a gap in CLAUDE.md rather
+			// than faked with a non-existent API.
+
+			buildKeyboard();
+			document.getElementById('keyboard-toggle').addEventListener('click', () => {
+				const kb = document.getElementById('keyboard');
+				kb.hidden = !kb.hidden;
+				resizeCanvas();
+			});
+		}
+
+		// Key codes straight from chips' systems/c64.h (C64_KEY_* defines
+		// and the _c64_init_key_map() ASCII table) - see machines/c64/
+		// CLAUDE.md for how these were verified against source rather than
+		// guessed. c64_key_down()/up() take a resolved character code, not
+		// a raw matrix cell - the core has no public API to hold a bare
+		// SHIFT matrix press (SHIFT is registered only as a modifier, with
+		// no key-code of its own), so our on-screen SHIFT is a UI-level
+		// lock that changes which code subsequent taps send, not a real
+		// held matrix key. CTRL/C=/RESTORE/RUN-STOP/cursor keys etc. DO
+		// have real key-codes and genuinely hold via mousedown/mouseup.
+		function key(label, code, shiftCode, units) {
+			return { label, code, shiftCode: shiftCode ?? code, units };
+		}
+		function accent(label, code, units) {
+			return { label, code, shiftCode: code, units, accent: true };
+		}
+
+		const KEYBOARD_ROWS = [
+			[
+				accent('←', 0x04),
+				key('1', '1'.charCodeAt(0)), key('2', '2'.charCodeAt(0)), key('3', '3'.charCodeAt(0)),
+				key('4', '4'.charCodeAt(0)), key('5', '5'.charCodeAt(0)), key('6', '6'.charCodeAt(0)),
+				key('7', '7'.charCodeAt(0)), key('8', '8'.charCodeAt(0)), key('9', '9'.charCodeAt(0)),
+				key('0', '0'.charCodeAt(0)), key('+', '+'.charCodeAt(0)), key('-', '-'.charCodeAt(0)),
+				key('£', '~'.charCodeAt(0), '$'.charCodeAt(0)),
+				accent('HOME\nCLR', 0x0C, 1.3), accent('DEL\nINST', 0x01, 1.3),
+			],
+			[
+				accent('CTRL', 0x0E, 1.4),
+				key('Q', 'Q'.charCodeAt(0)), key('W', 'W'.charCodeAt(0)), key('E', 'E'.charCodeAt(0)),
+				key('R', 'R'.charCodeAt(0)), key('T', 'T'.charCodeAt(0)), key('Y', 'Y'.charCodeAt(0)),
+				key('U', 'U'.charCodeAt(0)), key('I', 'I'.charCodeAt(0)), key('O', 'O'.charCodeAt(0)),
+				key('P', 'P'.charCodeAt(0)), key('@', '@'.charCodeAt(0)), key('*', '*'.charCodeAt(0)),
+				accent('RESTORE', 0xFF, 1.3),
+			],
+			[
+				accent('RUN\nSTOP', 0x03, 0x07, 1.4),
+				key('A', 'A'.charCodeAt(0)), key('S', 'S'.charCodeAt(0)), key('D', 'D'.charCodeAt(0)),
+				key('F', 'F'.charCodeAt(0)), key('G', 'G'.charCodeAt(0)), key('H', 'H'.charCodeAt(0)),
+				key('J', 'J'.charCodeAt(0)), key('K', 'K'.charCodeAt(0)), key('L', 'L'.charCodeAt(0)),
+				key(':', ':'.charCodeAt(0)), key(';', ';'.charCodeAt(0)),
+				accent('RETURN', 0x0D, 1.6),
+			],
+			[
+				{ label: 'SHIFT', code: null, shiftCode: null, units: 1.5, lockable: true, accent: true },
+				key('Z', 'Z'.charCodeAt(0)), key('X', 'X'.charCodeAt(0)), key('C', 'C'.charCodeAt(0)),
+				key('V', 'V'.charCodeAt(0)), key('B', 'B'.charCodeAt(0)), key('N', 'N'.charCodeAt(0)),
+				key('M', 'M'.charCodeAt(0)), key(',', ','.charCodeAt(0)), key('.', '.'.charCodeAt(0)),
+				key('/', '/'.charCodeAt(0)),
+				{ label: 'SHIFT', code: null, shiftCode: null, units: 1.5, lockable: true, accent: true },
+				accent('▲\nCRSR ▼', 0x0A, 0x0B, 1.3),
+				accent('◀\nCRSR ▶', 0x09, 0x08, 1.3),
+			],
+			[
+				accent('C=', 0x0F, 1),
+				key('SPACE', 0x20, 0x20, 6),
+				accent('F1\nF2', 0xF1, 0xF2, 1.2),
+				accent('F3\nF4', 0xF3, 0xF4, 1.2),
+				accent('F5\nF6', 0xF5, 0xF6, 1.2),
+				accent('F7\nF8', 0xF7, 0xF8, 1.2),
+			],
+		];
+
+		function buildKeyElement(k, getShiftLocked, setShiftLocked) {
+			const btn = document.createElement('div');
+			btn.className = 'c64-vkb-key' + (k.accent ? ' c64-vkb-accent' : '');
+			btn.style.flexGrow = String(k.units ?? 1);
+			if (k.label.includes('\n')) {
+				const [top, main] = k.label.split('\n');
+				const topEl = document.createElement('span');
+				topEl.className = 'c64-vkb-top';
+				topEl.textContent = top;
+				const mainEl = document.createElement('span');
+				mainEl.textContent = main;
+				btn.append(topEl, mainEl);
+			} else {
+				btn.textContent = k.label;
+			}
+
+			if (k.lockable) {
+				// The two on-screen SHIFT keys: double-click locks (stays
+				// visually down and flips getShiftLocked() for subsequent
+				// taps), single click afterward releases - same
+				// double-click-to-lock convention as every other
+				// machine's shift key, even though there's no real matrix
+				// cell being held underneath (see the comment above
+				// KEYBOARD_ROWS for why).
+				const sync = () => btn.classList.toggle('c64-vkb-locked', getShiftLocked());
+				btn.addEventListener('click', () => { if (getShiftLocked()) { setShiftLocked(false); sync(); } });
+				btn.addEventListener('dblclick', () => { setShiftLocked(true); sync(); });
+				return btn;
+			}
+
+			let heldCode = null;
+			const press = (e) => {
+				e.preventDefault();
+				heldCode = getShiftLocked() ? k.shiftCode : k.code;
+				if (heldCode != null) Module._mx_key_down(heldCode);
+			};
+			const release = (e) => {
+				e.preventDefault();
+				if (heldCode != null) Module._mx_key_up(heldCode);
+				heldCode = null;
+			};
+			btn.addEventListener('pointerdown', press);
+			btn.addEventListener('pointerup', release);
+			btn.addEventListener('pointerleave', release);
+			btn.addEventListener('pointercancel', release);
+			return btn;
+		}
+
+		function buildKeyboard() {
+			let shiftLocked = false;
+			const getShiftLocked = () => shiftLocked;
+			const setShiftLocked = (v) => { shiftLocked = v; };
+			const keyboardEl = document.getElementById('keyboard');
+			for (const row of KEYBOARD_ROWS) {
+				const rowEl = document.createElement('div');
+				rowEl.className = 'c64-vkb-row';
+				for (const k of row) rowEl.appendChild(buildKeyElement(k, getShiftLocked, setShiftLocked));
+				keyboardEl.appendChild(rowEl);
+			}
+		}
+	</script>
+	<script src="c64.js"></script>
+</body>
+</html>

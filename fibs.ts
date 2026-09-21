@@ -87,6 +87,15 @@ function addEmulators(b: Builder) {
             t.setIdeFolder(ideFolder);
             t.addSources([`${emu}.c`]);
             t.addDependencies(['common', 'roms']);
+            // The Multitude's own web shell (machines/c64/web/index.html)
+            // calls into the mx_* bridge in c64.c via Module.ccall() with
+            // 'array' args (for PRG-blob loading), which needs 'ccall' in
+            // EXPORTED_RUNTIME_METHODS - not on by default. Scoped to just
+            // the c64 target so it doesn't change every other system's
+            // build (bombjack/pacman/etc. aren't part of this project).
+            if (emu === 'c64') {
+                t.addLinkOptions([`-sEXPORTED_RUNTIME_METHODS=['ccall']`]);
+            }
         });
         // emulator with UI
         b.addTarget(`${emu}-ui`, 'windowed-exe', (t) => {
