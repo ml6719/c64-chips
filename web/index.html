@@ -185,8 +185,16 @@
 		<button id="pick-1541-rom" class="mx-load">Load 1541 ROM…</button>
 		<input type="file" id="file-1541-rom" accept=".bin,.rom" hidden />
 		<button id="reset-1541-rom" hidden>Reset 1541 ROM</button>
+		<span id="system-rom-label">ROM: open-roms</span>
+		<button id="pick-system-rom" class="mx-load">Load System ROM…</button>
+		<input type="file" id="file-system-rom" multiple accept=".bin,.rom" hidden />
+		<button id="reset-system-rom" hidden>Reset System ROM</button>
 		<button id="fullscreen">Fullscreen</button>
 		<button id="keyboard-toggle">⌨ Keyboard</button>
+		<label class="mx-field">
+			<button id="mute-toggle" class="mx-mute" title="Mute">🔊</button>
+			<input type="range" id="volume-slider" class="mx-volume" min="0" max="100" value="100" />
+		</label>
 	</div>
 	<div class="mx-main">
 		<div id="canvas-wrap">
@@ -392,6 +400,9 @@
 		const C1541_ROM_SESSION_KEY_C000 = 'c64C1541RomC000Base64';
 		const C1541_ROM_SESSION_KEY_E000 = 'c64C1541RomE000Base64';
 		const C1541_ROM_SESSION_KEY_NAME = 'c64C1541RomName';
+		const SYSTEM_ROM_SESSION_KEY_KERNAL = 'c64SystemRomKernalBase64';
+		const SYSTEM_ROM_SESSION_KEY_BASIC = 'c64SystemRomBasicBase64';
+		const SYSTEM_ROM_SESSION_KEY_CHAR = 'c64SystemRomCharBase64';
 		function bytesToBase64(bytes) {
 			let binary = '';
 			for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
@@ -417,6 +428,19 @@
 			const c000 = base64ToBytes(c000b64);
 			const e000 = base64ToBytes(e000b64);
 			Module.ccall('mx_stage_c1541_rom', null, ['array', 'number', 'array', 'number'], [c000, c000.length, e000, e000.length]);
+			return true;
+		}
+		function restageSystemRomIfPresent() {
+			const kernalb64 = sessionStorage.getItem(SYSTEM_ROM_SESSION_KEY_KERNAL);
+			const basicb64 = sessionStorage.getItem(SYSTEM_ROM_SESSION_KEY_BASIC);
+			const charb64 = sessionStorage.getItem(SYSTEM_ROM_SESSION_KEY_CHAR);
+			if (!kernalb64 || !basicb64 || !charb64) return false;
+			const kernalBytes = base64ToBytes(kernalb64);
+			const basicBytes = base64ToBytes(basicb64);
+			const charBytes = base64ToBytes(charb64);
+			Module.ccall('mx_stage_system_rom', null,
+				['array', 'number', 'array', 'number', 'array', 'number'],
+				[charBytes, charBytes.length, basicBytes, basicBytes.length, kernalBytes, kernalBytes.length]);
 			return true;
 		}
 
@@ -450,6 +474,48 @@
 				sessionStorage.removeItem(C1541_ROM_SESSION_KEY_C000);
 				sessionStorage.removeItem(C1541_ROM_SESSION_KEY_E000);
 				sessionStorage.removeItem(C1541_ROM_SESSION_KEY_NAME);
+				window.location.reload();
+			});
+
+			const sysStaged = restageSystemRomIfPresent();
+			const systemRomLabel = document.getElementById('system-rom-label');
+			const resetSystemRomButton = document.getElementById('reset-system-rom');
+			if (sysStaged) {
+				systemRomLabel.textContent = 'ROM: open-roms + real KERNAL/BASIC/CHAR';
+				resetSystemRomButton.hidden = false;
+			}
+			document.getElementById('pick-system-rom').addEventListener('click', () => document.getElementById('file-system-rom').click());
+			document.getElementById('file-system-rom').addEventListener('change', async () => {
+				const files = [...document.getElementById('file-system-rom').files];
+				if (files.length === 0) return;
+				// KERNAL and BASIC are both 8K, so size alone can't tell
+				// them apart - match by filename keyword instead (how real
+				// romset dumps are actually named: kernal.901227-03.bin,
+				// basic.901226-01.bin, characters.901225-01.bin or similar).
+				const find = (keyword) => files.find((f) => f.name.toLowerCase().includes(keyword));
+				const kernalFile = find('kernal');
+				const basicFile = find('basic');
+				const charFile = find('char'); // matches "char" and "chargen"
+				if (!kernalFile || !basicFile || !charFile) {
+					alert('Need 3 files with "kernal", "basic", and "char" (or "chargen") somewhere in their names.');
+					return;
+				}
+				const kernalBytes = new Uint8Array(await kernalFile.arrayBuffer());
+				const basicBytes = new Uint8Array(await basicFile.arrayBuffer());
+				const charBytes = new Uint8Array(await charFile.arrayBuffer());
+				if (kernalBytes.length !== 0x2000 || basicBytes.length !== 0x2000 || charBytes.length !== 0x1000) {
+					alert('Wrong size(s) - need KERNAL 8192 bytes, BASIC 8192 bytes, character ROM 4096 bytes.');
+					return;
+				}
+				sessionStorage.setItem(SYSTEM_ROM_SESSION_KEY_KERNAL, bytesToBase64(kernalBytes));
+				sessionStorage.setItem(SYSTEM_ROM_SESSION_KEY_BASIC, bytesToBase64(basicBytes));
+				sessionStorage.setItem(SYSTEM_ROM_SESSION_KEY_CHAR, bytesToBase64(charBytes));
+				window.location.reload();
+			});
+			resetSystemRomButton.addEventListener('click', () => {
+				sessionStorage.removeItem(SYSTEM_ROM_SESSION_KEY_KERNAL);
+				sessionStorage.removeItem(SYSTEM_ROM_SESSION_KEY_BASIC);
+				sessionStorage.removeItem(SYSTEM_ROM_SESSION_KEY_CHAR);
 				window.location.reload();
 			});
 
@@ -503,31 +569,90 @@
 				document.documentElement.requestFullscreen();
 			});
 
+			// Live volume control - lazily splices a GainNode between
+			// sokol_audio's own Web Audio node and its destination the
+			// first time it's touched (Module._saudio_context/_saudio_node
+			// don't exist until audio actually starts). Exposed directly
+			// on Module by sokol_audio.h's Emscripten backend - simpler
+			// than Hatari's equivalent (SDL2 buries it under Module.SDL2).
+			let gainNode = null;
+			function getGainNode() {
+				const ctx = Module._saudio_context;
+				const node = Module._saudio_node;
+				if (!node || !ctx) return null;
+				if (!gainNode) {
+					gainNode = ctx.createGain();
+					node.disconnect();
+					node.connect(gainNode);
+					gainNode.connect(ctx.destination);
+				}
+				return gainNode;
+			}
+			const volumeSlider = document.getElementById('volume-slider');
+			const muteButton = document.getElementById('mute-toggle');
+			let muted = false;
+			let volumeBeforeMute = volumeSlider.value;
+			function applyVolume() {
+				const node = getGainNode();
+				if (!node) return;
+				node.gain.value = muted ? 0 : volumeSlider.value / 100;
+			}
+			volumeSlider.addEventListener('input', () => {
+				if (muted && volumeSlider.value != 0) {
+					muted = false;
+					muteButton.textContent = '🔊';
+				}
+				applyVolume();
+			});
+			muteButton.addEventListener('click', () => {
+				muted = !muted;
+				muteButton.textContent = muted ? '🔇' : '🔊';
+				if (!muted && volumeSlider.value == 0) {
+					volumeSlider.value = volumeBeforeMute > 0 ? volumeBeforeMute : 100;
+				}
+				if (muted) volumeBeforeMute = volumeSlider.value;
+				applyVolume();
+			});
+
 			document.getElementById('hamburger').addEventListener('click', () => {
 				document.getElementById('toolbar').classList.toggle('mx-open');
 			});
 
-			// Canvas sizing: sokol_app's own Emscripten backend already
-			// watches window resize and re-fits its backing store to
-			// whatever CSS box the canvas has (confirmed in sokol_app.h -
-			// emscripten_set_resize_callback), unlike Hatari/SDL2 which
-			// needed our own manual resize loop. We just need to give it
-			// an aspect-ratio-correct CSS box ourselves, same as every
-			// other machine's canvas-wrap.
+			// Canvas sizing: sokol_app's Emscripten backend watches the
+			// canvas's CSS size and re-fits its backing store to match
+			// (emscripten_set_resize_callback in sokol_app.h) - same
+			// "external CSS size wins" trap as SDL2/Hatari, just phrased
+			// as a feature there. Setting a CSS size based on canvas.width/
+			// height BEFORE sokol has established its real native
+			// resolution (still the browser's 300x150 default at that
+			// point) corrupts it permanently - confirmed: canvas.width
+			// ended up as 1611 (matching a wrongly-computed CSS size,
+			// not any real C64 resolution) when this called resizeCanvas()
+			// eagerly on load. Fix: capture the real native resolution
+			// exactly ONCE, from the first genuine width/height attribute
+			// mutation, into fixed variables - then always scale from
+			// those cached values, never by re-reading canvas.width/height
+			// live (which sokol's own feedback loop could re-corrupt).
 			const canvas = document.getElementById('canvas');
 			const canvasWrap = document.getElementById('canvas-wrap');
+			let nativeW = 0, nativeH = 0;
 			function resizeCanvas() {
-				if (!canvas.width || !canvas.height) return;
-				const scale = Math.min(
-					canvasWrap.clientWidth / canvas.width,
-					canvasWrap.clientHeight / canvas.height
-				);
-				canvas.style.width = Math.floor(canvas.width * scale) + 'px';
-				canvas.style.height = Math.floor(canvas.height * scale) + 'px';
+				if (!nativeW || !nativeH) return;
+				const scale = Math.min(canvasWrap.clientWidth / nativeW, canvasWrap.clientHeight / nativeH);
+				canvas.style.width = Math.floor(nativeW * scale) + 'px';
+				canvas.style.height = Math.floor(nativeH * scale) + 'px';
 			}
 			window.addEventListener('resize', resizeCanvas);
-			new MutationObserver(resizeCanvas).observe(canvas, { attributes: true, attributeFilter: ['width', 'height'] });
-			resizeCanvas();
+			// Same mobile-chrome-resize gap as Atari ST: a plain window
+			// 'resize' listener misses address-bar collapse/orientation
+			// changes that resize #canvas-wrap without always firing it.
+			new ResizeObserver(resizeCanvas).observe(canvasWrap);
+			new MutationObserver(() => {
+				if (nativeW || canvas.width <= 1 || canvas.height <= 1) return;
+				nativeW = canvas.width;
+				nativeH = canvas.height;
+				resizeCanvas();
+			}).observe(canvas, { attributes: true, attributeFilter: ['width', 'height'] });
 
 			// Focus-pause: chips-test doesn't have Hatari's pause()/
 			// resume() API exposed to us, so approximate it by starving
@@ -563,14 +688,28 @@
 			return { label, code, shiftCode: code, units, accent: true };
 		}
 
+		// Shift codes below are the *other* character the real hardware
+		// actually produces (verified against the same _c64_init_key_map()
+		// keymap table, both halves - not guessed): e.g. SHIFT+7 on a real
+		// C64 types "'", not "&" like a PC keyboard. Keys whose shift slot
+		// produces nothing distinct (same char, or a bare space no one
+		// actually uses) skip the second label rather than show a
+		// meaningless one.
 		const KEYBOARD_ROWS = [
 			[
 				accent('←', 0x04),
-				key('1', '1'.charCodeAt(0)), key('2', '2'.charCodeAt(0)), key('3', '3'.charCodeAt(0)),
-				key('4', '4'.charCodeAt(0)), key('5', '5'.charCodeAt(0)), key('6', '6'.charCodeAt(0)),
-				key('7', '7'.charCodeAt(0)), key('8', '8'.charCodeAt(0)), key('9', '9'.charCodeAt(0)),
-				key('0', '0'.charCodeAt(0)), key('+', '+'.charCodeAt(0)), key('-', '-'.charCodeAt(0)),
-				key('£', '~'.charCodeAt(0), '$'.charCodeAt(0)),
+				key('!\n1', '1'.charCodeAt(0), '!'.charCodeAt(0)),
+				key('"\n2', '2'.charCodeAt(0), '"'.charCodeAt(0)),
+				key('#\n3', '3'.charCodeAt(0), '#'.charCodeAt(0)),
+				key('$\n4', '4'.charCodeAt(0), '$'.charCodeAt(0)),
+				key('%\n5', '5'.charCodeAt(0), '%'.charCodeAt(0)),
+				key('&\n6', '6'.charCodeAt(0), '&'.charCodeAt(0)),
+				key('\'\n7', '7'.charCodeAt(0), '\''.charCodeAt(0)),
+				key('(\n8', '8'.charCodeAt(0), '('.charCodeAt(0)),
+				key(')\n9', '9'.charCodeAt(0), ')'.charCodeAt(0)),
+				key('0', '0'.charCodeAt(0)),
+				key('+', '+'.charCodeAt(0)), key('-', '-'.charCodeAt(0)),
+				key('$\n£', '~'.charCodeAt(0), '$'.charCodeAt(0)),
 				accent('HOME\nCLR', 0x0C, 1.3), accent('DEL\nINST', 0x01, 1.3),
 			],
 			[
@@ -583,18 +722,23 @@
 			],
 			[
 				accent('RUN\nSTOP', 0x03, 0x07, 1.4),
+				{ label: 'SHIFT\nLOCK', code: null, shiftCode: null, units: 1.4, lockable: true, accent: true },
 				key('A', 'A'.charCodeAt(0)), key('S', 'S'.charCodeAt(0)), key('D', 'D'.charCodeAt(0)),
 				key('F', 'F'.charCodeAt(0)), key('G', 'G'.charCodeAt(0)), key('H', 'H'.charCodeAt(0)),
 				key('J', 'J'.charCodeAt(0)), key('K', 'K'.charCodeAt(0)), key('L', 'L'.charCodeAt(0)),
-				key(':', ':'.charCodeAt(0)), key(';', ';'.charCodeAt(0)),
+				key('[\n:', ':'.charCodeAt(0), '['.charCodeAt(0)),
+				key(']\n;', ';'.charCodeAt(0), ']'.charCodeAt(0)),
+				key('=', '='.charCodeAt(0)),
 				accent('RETURN', 0x0D, 1.6),
 			],
 			[
 				{ label: 'SHIFT', code: null, shiftCode: null, units: 1.5, lockable: true, accent: true },
 				key('Z', 'Z'.charCodeAt(0)), key('X', 'X'.charCodeAt(0)), key('C', 'C'.charCodeAt(0)),
 				key('V', 'V'.charCodeAt(0)), key('B', 'B'.charCodeAt(0)), key('N', 'N'.charCodeAt(0)),
-				key('M', 'M'.charCodeAt(0)), key(',', ','.charCodeAt(0)), key('.', '.'.charCodeAt(0)),
-				key('/', '/'.charCodeAt(0)),
+				key('M', 'M'.charCodeAt(0)),
+				key('<\n,', ','.charCodeAt(0), '<'.charCodeAt(0)),
+				key('>\n.', '.'.charCodeAt(0), '>'.charCodeAt(0)),
+				key('?\n/', '/'.charCodeAt(0), '?'.charCodeAt(0)),
 				{ label: 'SHIFT', code: null, shiftCode: null, units: 1.5, lockable: true, accent: true },
 				accent('▲\nCRSR ▼', 0x0A, 0x0B, 1.3),
 				accent('◀\nCRSR ▶', 0x09, 0x08, 1.3),
@@ -609,7 +753,7 @@
 			],
 		];
 
-		function buildKeyElement(k, getShiftLocked, setShiftLocked) {
+		function buildKeyElement(k, getShiftLocked, setShiftLocked, lockSyncFns) {
 			const btn = document.createElement('div');
 			btn.className = 'c64-vkb-key' + (k.accent ? ' c64-vkb-accent' : '');
 			btn.style.flexGrow = String(k.units ?? 1);
@@ -626,16 +770,20 @@
 			}
 
 			if (k.lockable) {
-				// The two on-screen SHIFT keys: double-click locks (stays
-				// visually down and flips getShiftLocked() for subsequent
+				// Three keys share this lock state (SHIFT x2 + SHIFT
+				// LOCK, matching real hardware's layout - SHIFT LOCK is
+				// just a mechanical latch on the same matrix cell as the
+				// left SHIFT). Double-click locks (stays visually down on
+				// ALL three and flips getShiftLocked() for subsequent
 				// taps), single click afterward releases - same
 				// double-click-to-lock convention as every other
 				// machine's shift key, even though there's no real matrix
 				// cell being held underneath (see the comment above
 				// KEYBOARD_ROWS for why).
 				const sync = () => btn.classList.toggle('c64-vkb-locked', getShiftLocked());
-				btn.addEventListener('click', () => { if (getShiftLocked()) { setShiftLocked(false); sync(); } });
-				btn.addEventListener('dblclick', () => { setShiftLocked(true); sync(); });
+				lockSyncFns.push(sync);
+				btn.addEventListener('click', () => { if (getShiftLocked()) setShiftLocked(false); });
+				btn.addEventListener('dblclick', () => setShiftLocked(true));
 				return btn;
 			}
 
@@ -659,13 +807,14 @@
 
 		function buildKeyboard() {
 			let shiftLocked = false;
+			const lockSyncFns = [];
 			const getShiftLocked = () => shiftLocked;
-			const setShiftLocked = (v) => { shiftLocked = v; };
+			const setShiftLocked = (v) => { shiftLocked = v; for (const sync of lockSyncFns) sync(); };
 			const keyboardEl = document.getElementById('keyboard');
 			for (const row of KEYBOARD_ROWS) {
 				const rowEl = document.createElement('div');
 				rowEl.className = 'c64-vkb-row';
-				for (const k of row) rowEl.appendChild(buildKeyElement(k, getShiftLocked, setShiftLocked));
+				for (const k of row) rowEl.appendChild(buildKeyElement(k, getShiftLocked, setShiftLocked, lockSyncFns));
 				keyboardEl.appendChild(rowEl);
 			}
 		}

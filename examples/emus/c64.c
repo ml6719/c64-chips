@@ -116,6 +116,25 @@ EMSCRIPTEN_KEEPALIVE void mx_stage_c1541_rom(void* c000_ptr, int c000_len, void*
     memcpy(mx_c1541_e000_staged, e000_ptr, sizeof(mx_c1541_e000_staged));
     mx_c1541_staged = true;
 }
+
+// Same staging pattern, for the C64's own KERNAL/BASIC/character ROMs -
+// genuinely separate chips on separate hardware from the 1541's firmware
+// above (real hardware: computer vs. external disk drive unit), so this
+// needs its own upload, not something a 1541 ROM upload implies.
+static uint8_t mx_char_staged[0x1000];
+static uint8_t mx_basic_staged[0x2000];
+static uint8_t mx_kernal_staged[0x2000];
+static bool mx_system_rom_staged = false;
+
+EMSCRIPTEN_KEEPALIVE void mx_stage_system_rom(void* char_ptr, int char_len, void* basic_ptr, int basic_len, void* kernal_ptr, int kernal_len) {
+    if (char_len != sizeof(mx_char_staged) || basic_len != sizeof(mx_basic_staged) || kernal_len != sizeof(mx_kernal_staged)) {
+        return; // wrong size(s) - refuse rather than corrupt
+    }
+    memcpy(mx_char_staged, char_ptr, sizeof(mx_char_staged));
+    memcpy(mx_basic_staged, basic_ptr, sizeof(mx_basic_staged));
+    memcpy(mx_kernal_staged, kernal_ptr, sizeof(mx_kernal_staged));
+    mx_system_rom_staged = true;
+}
 #endif
 
 #ifdef CHIPS_USE_UI
@@ -171,9 +190,21 @@ c64_desc_t c64_desc(c64_joystick_type_t joy_type, bool c1530_enabled, bool c1541
             .sample_rate = saudio_sample_rate(),
         },
         .roms = {
+#if defined(__EMSCRIPTEN__)
+            .chars = mx_system_rom_staged
+                ? (chips_range_t){ .ptr=mx_char_staged, .size=sizeof(mx_char_staged) }
+                : (chips_range_t){ .ptr=dump_c64_char_bin, .size=sizeof(dump_c64_char_bin) },
+            .basic = mx_system_rom_staged
+                ? (chips_range_t){ .ptr=mx_basic_staged, .size=sizeof(mx_basic_staged) }
+                : (chips_range_t){ .ptr=dump_c64_basic_bin, .size=sizeof(dump_c64_basic_bin) },
+            .kernal = mx_system_rom_staged
+                ? (chips_range_t){ .ptr=mx_kernal_staged, .size=sizeof(mx_kernal_staged) }
+                : (chips_range_t){ .ptr=dump_c64_kernalv3_bin, .size=sizeof(dump_c64_kernalv3_bin) },
+#else
             .chars = { .ptr=dump_c64_char_bin, .size=sizeof(dump_c64_char_bin) },
             .basic = { .ptr=dump_c64_basic_bin, .size=sizeof(dump_c64_basic_bin) },
             .kernal = { .ptr=dump_c64_kernalv3_bin, .size=sizeof(dump_c64_kernalv3_bin) },
+#endif
             .c1541 = {
 #if defined(__EMSCRIPTEN__)
                 .c000_dfff = mx_c1541_staged
@@ -217,7 +248,7 @@ void app_init(void) {
     c64_desc_t desc = c64_desc(joy_type, c1530_enabled, c1541_enabled);
     c64_init(&state.c64, &desc);
     gfx_init(&(gfx_desc_t){
-        .disable_speaker_icon = sargs_exists("disable-speaker-icon"),
+        .disable_speaker_icon = true, // The Multitude has its own volume/mute control in the toolbar
         #ifdef CHIPS_USE_UI
         .init_extra_cb = ui_preinit,
         .draw_extra_cb = ui_draw,
@@ -321,7 +352,8 @@ void app_frame(void) {
     const uint64_t emu_start_time = stm_now();
     state.ticks = c64_exec(&state.c64, state.frame_time_us);
     state.emu_time_ms = stm_ms(stm_since(emu_start_time));
-    draw_status_bar();
+    // draw_status_bar() (upstream's debug frame-timing overlay) deliberately
+    // not called - not wanted in our production shell.
     gfx_draw(c64_display_info(&state.c64));
     handle_file_loading();
     send_keybuf_input();
