@@ -679,6 +679,21 @@
 				nativeW = canvas.width;
 				nativeH = canvas.height;
 				resizeCanvas();
+				// The very first call above can race the browser's own layout
+				// settling on a real phone (confirmed on Atari ST by
+				// reproducing it directly: the wrap measured its final,
+				// correct size only some variable amount of time later, with
+				// nothing re-triggering resizeCanvas() to notice - it just
+				// stayed wrong forever with no further resize event to save
+				// it). Rather than guess a single delay that settling might
+				// not respect on a slower/different device, poll for a few
+				// seconds and stop - cheap, and a no-op on every call once
+				// the first one was already right.
+				let resizePollCount = 0;
+				const resizePollId = setInterval(() => {
+					resizeCanvas();
+					if (++resizePollCount >= 10) clearInterval(resizePollId);
+				}, 400);
 			}).observe(canvas, { attributes: true, attributeFilter: ['width', 'height'] });
 
 			// Focus-pause: chips-test doesn't have Hatari's pause()/
