@@ -27,7 +27,7 @@
 		.mx-hamburger {
 			position: fixed;
 			top: 8px;
-			right: 8px;
+			left: 8px;
 			z-index: 30;
 			width: 40px;
 			height: 40px;
@@ -60,7 +60,8 @@
 			display: flex;
 		}
 		.mx-toolbar button,
-		.mx-toolbar select {
+		.mx-toolbar select,
+		.mx-toolbar .mx-home {
 			font-family: monospace;
 			font-size: 13px;
 			background: #262842;
@@ -68,6 +69,12 @@
 			border: 1px solid #565a82;
 			padding: 6px 8px;
 			cursor: pointer;
+		}
+		.mx-toolbar .mx-home {
+			display: block;
+			text-align: center;
+			text-decoration: none;
+			box-sizing: border-box;
 		}
 		.mx-main {
 			flex: 1;
@@ -99,16 +106,16 @@
 				display: flex !important;
 				position: static;
 				inset: auto;
-				order: 2;
+				order: 1;
 				width: 220px;
 				flex-shrink: 0;
 				height: 100%;
 				padding: 16px;
 				border-bottom: none;
-				border-left: 2px solid #43456a;
+				border-right: 2px solid #43456a;
 			}
 			.mx-main {
-				order: 1;
+				order: 2;
 			}
 		}
 
@@ -169,6 +176,7 @@
 <body class="mx-app">
 	<button id="hamburger" class="mx-hamburger">☰</button>
 	<div id="toolbar" class="mx-toolbar">
+		<a href="../" class="mx-home">🏠 Home</a>
 		<button id="reset">Reset</button>
 		<button id="pick-prg" class="mx-load">Load disk/PRG…</button>
 		<input type="file" id="file-prg" accept=".prg,.d64,.zip" hidden />
