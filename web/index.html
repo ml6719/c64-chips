@@ -179,7 +179,7 @@
 		<a href="../" class="mx-home">🏠 Home</a>
 		<button id="reset">Reset</button>
 		<button id="pick-prg" class="mx-load">Load disk/PRG…</button>
-		<input type="file" id="file-prg" accept=".prg,.d64,.zip" hidden />
+		<input type="file" id="file-prg" accept=".prg,.d64,.zip,.gz" hidden />
 		<select id="d64-programs" hidden></select>
 		<span id="drive-mode-label">Drive: software</span>
 		<button id="pick-1541-rom" class="mx-load">Load 1541 ROM…</button>
@@ -269,6 +269,30 @@
 		}
 		async function inflate(compressed) {
 			const ds = new DecompressionStream('deflate-raw');
+			const writer = ds.writable.getWriter();
+			writer.write(compressed);
+			writer.close();
+			const reader = ds.readable.getReader();
+			const chunks = [];
+			let totalLen = 0;
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				chunks.push(value);
+				totalLen += value.byteLength;
+			}
+			const result = new Uint8Array(totalLen);
+			let offset = 0;
+			for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+			return result;
+		}
+
+		// .gz support: a single gzip-compressed stream, not an archive -
+		// decompress the whole file and drop the .gz suffix, same
+		// DecompressionStream API as unzip()'s inflate() above, just the
+		// browser's built-in 'gzip' format instead of 'deflate-raw'.
+		async function gunzip(compressed) {
+			const ds = new DecompressionStream('gzip');
 			const writer = ds.writable.getWriter();
 			writer.write(compressed);
 			writer.close();
@@ -556,6 +580,9 @@
 					if (entries.length === 0) { alert('ZIP has no .prg or .d64 file'); return; }
 					bytes = entries[0].data;
 					name = entries[0].name;
+				} else if (/\.gz$/i.test(name)) {
+					bytes = await gunzip(bytes);
+					name = name.replace(/\.gz$/i, '');
 				}
 				if (/\.d64$/i.test(name)) {
 					loadD64(bytes);
