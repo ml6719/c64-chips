@@ -98,9 +98,80 @@ and our shell doesn't expose real disk-drive emulation anyway (PRG quickload onl
 `mx_quickload_prg` bridge below — see `web_load()`'s SYS-call-only behavior in c64.c for
 why we didn't just wire up `webapi.c`'s existing 16-byte-header `load()` path instead),
 **zeroed out both 1541 ROM files' contents** (same filenames, all-zero bytes, correct
-sizes) rather than ship the real firmware unnecessarily. If real `.d64` disk emulation is
-ever added, this needs a real fix first (either find/wait for an open 1541 replacement, or
-drop `c1541-roms.h`/the drive object from `c64.c` entirely instead of just stubbing it).
+sizes) rather than ship the real firmware unnecessarily.
+
+## D64 support: software directory parsing, no drive ROM
+
+Revisited this after learning D64 (not PRG) is the dominant format on GameBase64/CSDb —
+most real-world C64 software is archived as full disk images, not extracted programs.
+Explored three ways to get real 1541-hardware-accurate emulation and ruled out all three:
+1. **Bundle the real ROM anyway** — same copyright problem as above, just louder about it.
+2. **Decompile the real ROM and write "an equivalent"** — still a derivative work of the
+   original; looking at decompiled code taints a clean-room defense regardless of how the
+   new code is written (see *Atari Games v. Nintendo* — this is exactly the pattern that
+   lost).
+3. **Find an existing open alternative** — checked thoroughly: `Pi1541` ("cycle-exact"
+   1541 emulator) turns out to run a full 6502 CPU emulation **of the real ROM**, supplied
+   by the user at runtime (confirmed in its `ROMs.h` — it doesn't reimplement DOS logic at
+   all, it just runs the original firmware on different hardware); `mist64/dos1541` is
+   explicitly a disassembly **reconstruction** that "build[s] into the exact ROM images" —
+   its own README says so. Neither is a source alternative; both are still the same
+   copyrighted firmware wearing different clothes. A genuine clean-room implementation
+   (independent spec team + independent implementation team, zero code-sharing) would be a
+   real, weeks-to-months project on its own — and even a good one likely wouldn't reproduce
+   the undocumented ROM bugs that copy-protection schemes on the disks people care about
+   most are specifically checking for. Not attempted.
+
+**What we built instead**: `parseD64Directory()`/`readD64File()` in `web/index.html` read
+a D64 image's real on-disk structure directly — no drive ROM, no 6502 emulation of a
+drive, nothing copyrighted involved at all. Standard 35-track D64 layout (confirmed: the
+sectors-per-track table sums to exactly 174848 bytes, the well-known standard D64 size),
+directory chain starting at track 18/sector 1 (2-byte next-sector link + 8× 32-byte
+entries per sector, file type at each entry's `+2` offset, name at `+5..+20`), file data
+as a standard track/sector chain (2-byte link per 256-byte sector; last sector's second
+link byte is a valid-byte count, not a sector number). Verified with synthetic test D64s
+(both a single-sector file and a two-sector chain with a two-program directory) before
+wiring it into the shell — round-tripped correctly both times.
+
+Extracted PRG bytes feed straight into the already-built `mx_quickload_prg` bridge —
+**zero C code changes needed for D64 support itself**, this is pure JS. Auto-loads the
+first PRG found (matches "put disk in, it just runs" for the common single-program-disk
+case); shows a dropdown to pick a different one when a disk has more than one. `.zip`
+wrapping a `.d64` works the same way as everywhere else in this project.
+
+**Known limitation**: doesn't handle copy-protection schemes that check for genuine 1541
+drive-hardware timing/quirks — those need real drive emulation, which is what the next
+section is for.
+
+## Optional real 1541 ROM: user-supplied, never bundled
+
+For users who have their own legally-obtained 1541 ROM dump and want full drive-hardware
+fidelity (including copy-protection compatibility that software D64 parsing can't give),
+added a "Load 1541 ROM…" upload — same convention as Atari ST's "Load TOS": never bundled
+by us, user's own file, user's own responsibility.
+
+**How it's wired** (see the `mx_stage_c1541_rom` comment block in `c64.c`): `c64_desc()`
+was already just handing `c64_init()` plain pointers to the (now-zeroed) compiled-in ROM
+arrays — `.c1541 = { .c000_dfff = {.ptr=dump_1541_c000_..., ...}, ... }` — so the fix is a
+ternary: if a ROM has been staged, point at two new static buffers instead of the zeroed
+dump arrays. `c1541_enabled` (previously only `sargs_exists("c1541")`, an opt-in URL
+param) now also turns on automatically once a ROM is staged.
+
+**Staging timing, and why a reload avoids a real question I didn't want to leave
+unverified**: the ROM pointers only get read once, inside `app_init()`'s `c64_init()`
+call. Emscripten's `onRuntimeInitialized` (where our JS gets its first chance to call
+anything) fires before sokol_app's first `requestAnimationFrame`-scheduled frame (which is
+what actually calls `app_init()`) — but rather than rely on that timing holding on every
+browser/every session, the shell **reloads the page** after staging (same pattern as
+Atari ST's TOS upload: stash as base64 in `sessionStorage`, reload, restage from
+`sessionStorage` at the very start of the fresh module load, before anything else runs in
+`onReady()`). That makes the ordering trivially guaranteed rather than dependent on a
+timing assumption about `requestAnimationFrame` scheduling.
+
+Accepts one combined 16KB (`C000`-`FFFF`) ROM dump, the common single-file convention for
+1541 ROM preservation — split into the two 8K halves `c1541.h` actually wants
+(`c000_dfff`/`e000_ffff`) on our side, so the user doesn't need to source-split it
+themselves.
 
 ## Did NOT need to trim the `roms` targets
 

@@ -16637,7 +16637,7 @@ static uint8_t dump_tyan[616] = {
 };
 typedef struct { const char* name; const uint8_t* ptr; size_t size; } dump_item_t;
 #define DUMP_NUM_ITEMS (265)
-static const dump_item_t dump_items[DUMP_NUM_ITEMS] = {
+static dump_item_t dump_items[DUMP_NUM_ITEMS] = {
 { "_start", dump__start, 3438 },
 { "adca", dump_adca, 842 },
 { "adcax", dump_adcax, 865 },

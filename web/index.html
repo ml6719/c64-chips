@@ -59,7 +59,8 @@
 		.mx-toolbar.mx-open {
 			display: flex;
 		}
-		.mx-toolbar button {
+		.mx-toolbar button,
+		.mx-toolbar select {
 			font-family: monospace;
 			font-size: 13px;
 			background: #262842;
@@ -169,8 +170,13 @@
 	<button id="hamburger" class="mx-hamburger">☰</button>
 	<div id="toolbar" class="mx-toolbar">
 		<button id="reset">Reset</button>
-		<button id="pick-prg" class="mx-load">Load PRG…</button>
-		<input type="file" id="file-prg" accept=".prg,.zip" hidden />
+		<button id="pick-prg" class="mx-load">Load disk/PRG…</button>
+		<input type="file" id="file-prg" accept=".prg,.d64,.zip" hidden />
+		<select id="d64-programs" hidden></select>
+		<span id="drive-mode-label">Drive: software</span>
+		<button id="pick-1541-rom" class="mx-load">Load 1541 ROM…</button>
+		<input type="file" id="file-1541-rom" accept=".bin,.rom" hidden />
+		<button id="reset-1541-rom" hidden>Reset 1541 ROM</button>
 		<button id="fullscreen">Fullscreen</button>
 		<button id="keyboard-toggle">⌨ Keyboard</button>
 	</div>
@@ -265,6 +271,101 @@
 			return result;
 		}
 
+		// D64 support: parses the disk's real directory/file-chain structure
+		// directly in JS and extracts a chosen PRG's bytes - no 1541 drive
+		// ROM involved at all (see machines/c64/CLAUDE.md for why: the real
+		// firmware is copyrighted Commodore content we won't bundle, same
+		// call as every other ROM decision in this project). This covers
+		// the large majority of released C64 software - GameBase64/CSDb
+		// both standardize on D64 as the archive format, and most disks
+		// just need their directory read and a PRG's sectors copied out,
+		// not real drive-hardware timing. Doesn't handle copy-protection
+		// schemes that depend on genuine 1541 hardware quirks - those need
+		// the optional real-ROM path below instead.
+		//
+		// Standard 35-track, no-error-info D64: 174848 bytes exactly.
+		// http://vice-emu.sourceforge.net (1541 disk format) - sectors per
+		// track zone, directory chain starting at track 18/sector 1, GCR
+		// track/sector-chain file storage all match this widely-published,
+		// unambiguous format (confirmed: the sectors-per-track table below
+		// sums to exactly 174848 bytes, the well-known standard D64 size).
+		const D64_SECTORS_PER_TRACK = (() => {
+			const table = [];
+			for (let t = 1; t <= 17; t++) table[t] = 21;
+			for (let t = 18; t <= 24; t++) table[t] = 19;
+			for (let t = 25; t <= 30; t++) table[t] = 18;
+			for (let t = 31; t <= 35; t++) table[t] = 17;
+			return table;
+		})();
+		function d64SectorOffset(track, sector) {
+			let offset = 0;
+			for (let t = 1; t < track; t++) offset += D64_SECTORS_PER_TRACK[t];
+			return (offset + sector) * 256;
+		}
+		function d64ReadSector(bytes, track, sector) {
+			const off = d64SectorOffset(track, sector);
+			return bytes.subarray(off, off + 256);
+		}
+		function petsciiToAscii(petsciiBytes) {
+			let s = '';
+			for (const b of petsciiBytes) {
+				if (b === 0xA0) break; // padding
+				s += (b >= 0x20 && b < 0x7F) ? String.fromCharCode(b) : '?';
+			}
+			return s;
+		}
+		function parseD64Directory(bytes) {
+			const programs = [];
+			let track = 18, sector = 1;
+			const seen = new Set();
+			while (track !== 0) {
+				const key = track + '/' + sector;
+				if (seen.has(key)) break; // guard against a corrupt/circular chain
+				seen.add(key);
+				const dirSector = d64ReadSector(bytes, track, sector);
+				const nextTrack = dirSector[0];
+				const nextSector = dirSector[1];
+				for (let i = 0; i < 8; i++) {
+					const entryOff = i * 32;
+					const fileType = dirSector[entryOff + 2];
+					const fileTrack = dirSector[entryOff + 3];
+					const fileSector = dirSector[entryOff + 4];
+					const nameBytes = dirSector.subarray(entryOff + 5, entryOff + 21);
+					if ((fileType & 0x0F) === 2 && fileTrack !== 0) { // PRG type only
+						programs.push({ name: petsciiToAscii(nameBytes), track: fileTrack, sector: fileSector });
+					}
+				}
+				track = nextTrack;
+				sector = nextSector;
+			}
+			return programs;
+		}
+		function readD64File(bytes, track, sector) {
+			const chunks = [];
+			const seen = new Set();
+			while (track !== 0) {
+				const key = track + '/' + sector;
+				if (seen.has(key)) break;
+				seen.add(key);
+				const s = d64ReadSector(bytes, track, sector);
+				const nextTrack = s[0];
+				const nextSector = s[1];
+				if (nextTrack === 0) {
+					// last sector: nextSector holds the count of valid data bytes
+					chunks.push(s.subarray(2, 2 + nextSector));
+				} else {
+					chunks.push(s.subarray(2, 256));
+				}
+				track = nextTrack;
+				sector = nextSector;
+			}
+			const total = chunks.reduce((n, c) => n + c.length, 0);
+			const result = new Uint8Array(total);
+			let pos = 0;
+			for (const c of chunks) { result.set(c, pos); pos += c.length; }
+			return result;
+		}
+
 		function quickloadPrg(bytes) {
 			// 'array' arg type marshals via stack allocation - no need for
 			// raw _malloc/_free (not exported by default; ccall is, via
@@ -273,21 +374,121 @@
 			return Module.ccall('mx_quickload_prg', 'boolean', ['array', 'number'], [bytes, bytes.length]);
 		}
 
+		// Optional real 1541 drive emulation - off by default (software
+		// D64 parsing above covers the large majority of games with zero
+		// licensing exposure; see machines/c64/CLAUDE.md). If the user
+		// supplies their own legally-obtained ROM dump, we stage it into
+		// the WASM module and reboot - same "Load TOS" convention already
+		// used for Atari ST. sessionStorage carries the ROM across the
+		// reload, so it only needs re-picking if the tab is closed.
+		const C1541_ROM_SESSION_KEY_C000 = 'c64C1541RomC000Base64';
+		const C1541_ROM_SESSION_KEY_E000 = 'c64C1541RomE000Base64';
+		const C1541_ROM_SESSION_KEY_NAME = 'c64C1541RomName';
+		function bytesToBase64(bytes) {
+			let binary = '';
+			for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+			return btoa(binary);
+		}
+		function base64ToBytes(base64) {
+			const binary = atob(base64);
+			const bytes = new Uint8Array(binary.length);
+			for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+			return bytes;
+		}
+		// Must run as the very first thing in onReady(), before anything
+		// else - sokol_app's first frame (which runs app_init() ->
+		// c64_init(), the point where the ROM pointers actually get read)
+		// fires on the next requestAnimationFrame, strictly after this
+		// synchronous onRuntimeInitialized callback returns. Staging here
+		// is what makes c64_desc()'s ternaries (see c64.c) pick up the
+		// real ROM instead of the zeroed placeholder.
+		function restageC1541RomIfPresent() {
+			const c000b64 = sessionStorage.getItem(C1541_ROM_SESSION_KEY_C000);
+			const e000b64 = sessionStorage.getItem(C1541_ROM_SESSION_KEY_E000);
+			if (!c000b64 || !e000b64) return false;
+			const c000 = base64ToBytes(c000b64);
+			const e000 = base64ToBytes(e000b64);
+			Module.ccall('mx_stage_c1541_rom', null, ['array', 'number', 'array', 'number'], [c000, c000.length, e000, e000.length]);
+			return true;
+		}
+
 		function onReady(Module) {
+			const staged = restageC1541RomIfPresent();
+			const driveModeLabel = document.getElementById('drive-mode-label');
+			const resetRomButton = document.getElementById('reset-1541-rom');
+			if (staged) {
+				const name = sessionStorage.getItem(C1541_ROM_SESSION_KEY_NAME) || 'uploaded ROM';
+				driveModeLabel.textContent = 'Drive: real ROM (' + name + ')';
+				resetRomButton.hidden = false;
+			}
+			document.getElementById('pick-1541-rom').addEventListener('click', () => document.getElementById('file-1541-rom').click());
+			document.getElementById('file-1541-rom').addEventListener('change', async () => {
+				const file = document.getElementById('file-1541-rom').files[0];
+				if (!file) return;
+				const bytes = new Uint8Array(await file.arrayBuffer());
+				// Accept either one combined 16K (C000-FFFF) dump, the
+				// common single-file convention, or fail clearly rather
+				// than guess at a different split.
+				if (bytes.length !== 0x4000) {
+					alert('Expected a 16384-byte (16K) 1541 ROM dump (C000-FFFF combined). Got ' + bytes.length + ' bytes.');
+					return;
+				}
+				sessionStorage.setItem(C1541_ROM_SESSION_KEY_C000, bytesToBase64(bytes.subarray(0, 0x2000)));
+				sessionStorage.setItem(C1541_ROM_SESSION_KEY_E000, bytesToBase64(bytes.subarray(0x2000, 0x4000)));
+				sessionStorage.setItem(C1541_ROM_SESSION_KEY_NAME, file.name);
+				window.location.reload();
+			});
+			resetRomButton.addEventListener('click', () => {
+				sessionStorage.removeItem(C1541_ROM_SESSION_KEY_C000);
+				sessionStorage.removeItem(C1541_ROM_SESSION_KEY_E000);
+				sessionStorage.removeItem(C1541_ROM_SESSION_KEY_NAME);
+				window.location.reload();
+			});
+
 			document.getElementById('reset').addEventListener('click', () => Module._mx_reset());
 
 			const fileInput = document.getElementById('file-prg');
+			const d64Select = document.getElementById('d64-programs');
 			document.getElementById('pick-prg').addEventListener('click', () => fileInput.click());
+
+			function loadD64(d64Bytes) {
+				const programs = parseD64Directory(d64Bytes);
+				if (programs.length === 0) { alert('No PRG files found on this disk'); return; }
+				d64Select.innerHTML = '';
+				for (const p of programs) {
+					const opt = document.createElement('option');
+					opt.textContent = p.name || '(unnamed)';
+					d64Select.appendChild(opt);
+				}
+				d64Select.hidden = programs.length < 2;
+				d64Select.onchange = () => {
+					const p = programs[d64Select.selectedIndex];
+					quickloadPrg(readD64File(d64Bytes, p.track, p.sector));
+				};
+				// Load the first program immediately - matches how most
+				// single-program disks are meant to be used (put disk in,
+				// it just runs); the dropdown lets you pick a different
+				// one afterward if the disk has more than one.
+				quickloadPrg(readD64File(d64Bytes, programs[0].track, programs[0].sector));
+			}
+
 			fileInput.addEventListener('change', async () => {
 				const file = fileInput.files[0];
 				if (!file) return;
 				let bytes = new Uint8Array(await file.arrayBuffer());
-				if (/\.zip$/i.test(file.name)) {
-					const entries = await unzip(bytes, ['.prg']);
-					if (entries.length === 0) { alert('ZIP has no .prg file'); return; }
+				let name = file.name;
+				if (/\.zip$/i.test(name)) {
+					const entries = await unzip(bytes, ['.prg', '.d64']);
+					if (entries.length === 0) { alert('ZIP has no .prg or .d64 file'); return; }
 					bytes = entries[0].data;
+					name = entries[0].name;
 				}
-				quickloadPrg(bytes);
+				if (/\.d64$/i.test(name)) {
+					loadD64(bytes);
+				} else {
+					d64Select.hidden = true;
+					quickloadPrg(bytes);
+				}
 			});
 
 			document.getElementById('fullscreen').addEventListener('click', () => {

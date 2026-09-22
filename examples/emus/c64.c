@@ -91,6 +91,31 @@ EMSCRIPTEN_KEEPALIVE bool mx_quickload_prg(void* ptr, int size) {
     }
     return loaded;
 }
+
+// Optional real 1541 drive emulation: the copyrighted Commodore firmware
+// isn't bundled (see the c64_basic_bin/c64_char_bin/c64_kernalv3_bin swap
+// to open-roms, and the c1541 ROMs being zeroed out, both in
+// examples/roms/ - CLAUDE.md has the full reasoning), so real drive-
+// hardware emulation is off by default. If the *user* supplies their own
+// legally-obtained ROM dump, this stages it into these buffers and
+// c64_desc() below (see the ternaries in its .c1541 field) uses them
+// instead of the compiled-in (zeroed) dump_1541_*_bin arrays. Must be
+// called before app_init() actually runs c64_init() - the web shell
+// does this via a reload (same pattern as Atari ST's TOS upload): stage,
+// then reload with the ROM already sitting in sessionStorage, so this
+// runs at the very start of a fresh module load, not mid-session.
+static uint8_t mx_c1541_c000_staged[0x2000];
+static uint8_t mx_c1541_e000_staged[0x2000];
+static bool mx_c1541_staged = false;
+
+EMSCRIPTEN_KEEPALIVE void mx_stage_c1541_rom(void* c000_ptr, int c000_len, void* e000_ptr, int e000_len) {
+    if (c000_len != sizeof(mx_c1541_c000_staged) || e000_len != sizeof(mx_c1541_e000_staged)) {
+        return; // wrong size - not a real 8K+8K 1541 ROM dump, refuse rather than corrupt
+    }
+    memcpy(mx_c1541_c000_staged, c000_ptr, sizeof(mx_c1541_c000_staged));
+    memcpy(mx_c1541_e000_staged, e000_ptr, sizeof(mx_c1541_e000_staged));
+    mx_c1541_staged = true;
+}
 #endif
 
 #ifdef CHIPS_USE_UI
@@ -150,8 +175,17 @@ c64_desc_t c64_desc(c64_joystick_type_t joy_type, bool c1530_enabled, bool c1541
             .basic = { .ptr=dump_c64_basic_bin, .size=sizeof(dump_c64_basic_bin) },
             .kernal = { .ptr=dump_c64_kernalv3_bin, .size=sizeof(dump_c64_kernalv3_bin) },
             .c1541 = {
+#if defined(__EMSCRIPTEN__)
+                .c000_dfff = mx_c1541_staged
+                    ? (chips_range_t){ .ptr=mx_c1541_c000_staged, .size=sizeof(mx_c1541_c000_staged) }
+                    : (chips_range_t){ .ptr=dump_1541_c000_325302_01_bin, .size=sizeof(dump_1541_c000_325302_01_bin) },
+                .e000_ffff = mx_c1541_staged
+                    ? (chips_range_t){ .ptr=mx_c1541_e000_staged, .size=sizeof(mx_c1541_e000_staged) }
+                    : (chips_range_t){ .ptr=dump_1541_e000_901229_06aa_bin, .size=sizeof(dump_1541_e000_901229_06aa_bin) },
+#else
                 .c000_dfff = { .ptr=dump_1541_c000_325302_01_bin, .size=sizeof(dump_1541_c000_325302_01_bin) },
                 .e000_ffff = { .ptr=dump_1541_e000_901229_06aa_bin, .size=sizeof(dump_1541_e000_901229_06aa_bin) },
+#endif
             }
         },
         #if defined(CHIPS_USE_UI)
@@ -175,7 +209,11 @@ void app_init(void) {
         }
     }
     bool c1530_enabled = sargs_exists("c1530");
+#if defined(__EMSCRIPTEN__)
+    bool c1541_enabled = sargs_exists("c1541") || mx_c1541_staged;
+#else
     bool c1541_enabled = sargs_exists("c1541");
+#endif
     c64_desc_t desc = c64_desc(joy_type, c1530_enabled, c1541_enabled);
     c64_init(&state.c64, &desc);
     gfx_init(&(gfx_desc_t){
