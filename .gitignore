@@ -10,3 +10,8 @@ CMake*.json
 web/c64.js
 web/c64.wasm
 
+
+# Mechanically synced from machines/_shared/src/ by the parent repo's
+# build-site.mjs on every build - never hand-edit or commit a copy here.
+web/toolbar.css
+web/toolbar-dom.js
